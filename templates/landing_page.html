@@ -5,56 +5,93 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ app_name }}</title>
     <style>
+        /* Modern Font Stack and Body Reset */
         body {
-            font-family: sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             margin: 0;
             padding: 0;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-            background-color: #f4f4f4; /* Light background */
+            background-color: #f4f7fa; /* Very light, modern background */
         }
+        
+        /* Container modern look */
         .container {
-            width: 80%;
-            max-width: 800px;
-            padding: 40px;
+            width: 90%;
+            max-width: 500px; /* Slimmer container for focus */
+            padding: 50px;
             background-color: white;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-            border-radius: 8px;
+            /* Updated shadow for a lifted, modern look */
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            border-radius: 12px; /* Increased rounding */
             text-align: center;
         }
+        
         .header {
             display: flex;
-            justify-content: space-between;
+            flex-direction: column; /* Stack elements for simplicity on a landing page */
             align-items: center;
-            margin-bottom: 50px;
+            margin-bottom: 30px;
         }
+        
+        /* Prominent Logo/App Name */
         .logo {
-            font-size: 2.5em;
-            font-weight: bold;
+            font-size: 3em;
+            font-weight: 800; /* Bolder */
             color: #333;
+            letter-spacing: -1px; /* Tighter for modern look */
+            margin-bottom: 10px;
         }
+        
+        .auth-buttons {
+            width: 100%;
+            margin-top: 30px;
+        }
+
+        /* Modern CTA Button for Signin */
         .auth-buttons button {
-            padding: 10px 20px;
-            margin-left: 10px;
-            border: 1px solid #333;
-            border-radius: 5px;
+            width: 100%; /* Full width button */
+            padding: 15px 25px;
+            border: none;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 1em;
-            background-color: white;
-            transition: background-color 0.3s;
+            font-size: 1.1em;
+            font-weight: 600;
+            
+            /* Google Sign-in inspired style (Darker blue for a primary CTA) */
+            background-color: #4285F4;
+            color: white;
+            transition: background-color 0.3s, transform 0.1s, box-shadow 0.3s;
+            box-shadow: 0 4px 10px rgba(66, 133, 244, 0.3); /* Subtle button shadow */
         }
+        
         .auth-buttons button:hover {
-            background-color: #eee;
+            background-color: #357ae8; /* Slightly darker on hover */
+            box-shadow: 0 6px 15px rgba(66, 133, 244, 0.4);
         }
+        .auth-buttons button:active {
+            transform: translateY(1px);
+        }
+
         .content {
-            padding-top: 50px;
+            padding-top: 20px;
         }
+        
+        /* Updated Tagline style */
         .tagline {
             font-size: 1.8em;
+            font-weight: 300; /* Lighter weight for main text */
             color: #555;
             margin-top: 20px;
+            line-height: 1.4;
+        }
+        
+        .subtext {
+            margin-top: 20px;
+            color: #999;
+            font-size: 0.9em;
         }
     </style>
 </head>
@@ -62,14 +99,17 @@
     <div class="container">
         <div class="header">
             <div class="logo">{{ app_name }}</div>
-            <div class="auth-buttons">
-                <button onclick="alert('Login functionality goes here')">Login</button>
-                <button onclick="alert('Signup functionality goes here')">Signup</button>
-            </div>
         </div>
         <div class="content">
             <h1 class="tagline">{{ tagline }}</h1>
-            <p style="margin-top: 30px; color: #888;">Start exploring your new style today!</p>
+            
+            <div class="auth-buttons">
+                <button onclick="window.location.href = '/auth/google/login'">
+                    Continue with Google
+                </button>
+            </div>
+
+            <p class="subtext">Start exploring your new style today!</p>
         </div>
     </div>
 </body>
