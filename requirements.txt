@@ -2,6 +2,7 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.11.0
 Authlib==1.6.5
+cachetools==6.2.2
 certifi==2025.11.12
 cffi==2.0.0
 charset-normalizer==3.4.4
@@ -14,6 +15,13 @@ fastapi==0.121.3
 fastapi-cli==0.0.16
 fastapi-cloud-cli==0.5.0
 fastar==0.6.0
+filetype==1.2.0
+google-ai-generativelanguage==0.9.0
+google-api-core==2.28.1
+google-auth==2.43.0
+googleapis-common-protos==1.72.0
+grpcio==1.76.0
+grpcio-status==1.76.0
 h11==0.16.0
 h2==4.3.0
 hpack==4.1.0
@@ -22,11 +30,13 @@ httptools==0.7.1
 httpx==0.28.1
 hyperframe==6.1.0
 idna==3.11
+itsdangerous==2.2.0
 Jinja2==3.1.6
 jsonpatch==1.33
 jsonpointer==3.0.0
 langchain==1.0.8
 langchain-core==1.0.7
+langchain-google-genai==3.1.0
 langgraph==1.0.3
 langgraph-checkpoint==3.0.1
 langgraph-prebuilt==1.0.5
@@ -41,6 +51,10 @@ ormsgpack==1.12.0
 packaging==25.0
 postgrest==2.24.0
 propcache==0.4.1
+proto-plus==1.26.1
+protobuf==6.33.1
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
 pycparser==2.23
 pydantic==2.12.4
 pydantic_core==2.41.5
@@ -55,6 +69,7 @@ requests-toolbelt==1.0.0
 rich==14.2.0
 rich-toolkit==0.16.0
 rignore==0.7.6
+rsa==4.9.1
 sentry-sdk==2.45.0
 shellingham==1.5.4
 sniffio==1.3.1

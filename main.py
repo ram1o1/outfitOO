@@ -1,224 +1,300 @@
-from fastapi import FastAPI, Request, File, UploadFile # Modified: Added File, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, File, UploadFile, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
-# --- New Imports for Authentication ---
 from dotenv import load_dotenv
 from urllib.parse import urlencode
-from starlette.responses import RedirectResponse
 import httpx
-# --- New Imports for Supabase/File Handling ---
-from supabase import create_client, Client # New
-import uuid # New
+# --- Supabase ---
+from supabase import create_client, Client
+import uuid
+# --- Auth & Sessions ---
+from itsdangerous import URLSafeTimedSerializer
+# --- LangChain & Gemini ---
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+import base64
 
-# 0. Load Environment Variables from .env
+# 0. Load Environment Variables
 load_dotenv()
-# --- Google OAuth Configuration ---
+
+# --- Configuration ---
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI")
-AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
-USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
-# ------------------------------------
-
-# --- Supabase Configuration ---
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # This is your Anon Key
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+# Key for signing session cookies. Keep this SECRET!
+SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "unsafe-default-key")
+COOKIE_NAME = "outfitoo_session"
 
-# Initialize Supabase client
+# --- Initializations ---
+# 1. Supabase
 supabase: Client = None
 try:
-    if SUPABASE_URL and SUPABASE_KEY:
-        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    else:
-        print("WARNING: Supabase configuration (SUPABASE_URL or SUPABASE_KEY) missing.")
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 except Exception as e:
-    print(f"Error initializing Supabase client: {e}")
+    print(f"Error initializing Supabase: {e}")
 
-# --- Configuration for Templating ---
-# Create a 'templates' directory in the same folder as main.py
+# 2. LangChain / Gemini
+llm = None
+if GOOGLE_API_KEY:
+    # We use Gemini Pro Vision (or similar multimodal model) to handle images
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GOOGLE_API_KEY)
+else:
+    print("WARNING: GOOGLE_API_KEY missing. AI features won't work.")
+
+# 3. Session Serializer
+serializer = URLSafeTimedSerializer(SESSION_SECRET_KEY)
+
+# 4. FastAPI App & Templates
+app = FastAPI()
 TEMPLATES_DIR = "templates"
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
-# ------------------------------------
+# Optional: Serve static files (css/js/images) if you create a 'static' folder
+# app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# 1. Create the App instance
-app = FastAPI()
 
-# 2. Define a Pydantic model (for data validation) - Kept for future routes
-class Item(BaseModel):
-    name: str
-    price: float
-    is_offer: bool = None
+# --- Helper Functions for Auth ---
+def get_current_user_email(request: Request):
+    """Try to retrieve logged-in user email from signed cookie."""
+    session_token = request.cookies.get(COOKIE_NAME)
+    if not session_token:
+        return None
+    try:
+        # Try to unsign the token. Max age 1 day (86400 seconds)
+        data = serializer.loads(session_token, max_age=86400)
+        return data.get("email")
+    except:
+        # Signature expired or invalid
+        return None
 
-# 3. Create the Landing Page Route (Root)
+# Dependency to require login for protected routes
+def require_login(request: Request):
+    user_email = get_current_user_email(request)
+    if not user_email:
+        # Redirect to home if not logged in when trying to access a page
+        raise HTTPException(
+            status_code=status.HTTP_307_TEMPORARY_REDIRECT, 
+            detail="Not authorized",
+            headers={"Location": "/"}
+        )
+    return user_email
+
+
+# ================= ROUTES =================
+
+# --- Public Routes ---
 @app.get("/", response_class=HTMLResponse)
 def read_root(request: Request):
-    """
-    Renders the OutfitOO landing page template.
-    """
+    # If already logged in, redirect to dashboard
+    if get_current_user_email(request):
+         return RedirectResponse(url="/dashboard")
+         
     context = {
         "request": request,
         "app_name": "OutfitOO",
-        "tagline": "wanna try different outfits."
+        "tagline": "Wanna try different outfits."
     }
-    # Look for a file named 'landing_page.html' inside the 'templates' directory
     return templates.TemplateResponse("landing_page.html", context)
 
 
-# 4. Create a Route for Outfit Generation and Storage (New)
-@app.post("/api/generate_outfit/{user_id}")
-async def generate_and_store_outfit(
-    user_id: str,
+# --- Protected Frontend Routes (Require Login) ---
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page(request: Request, user_email: str = Depends(require_login)):
+    """The main upload and generation page."""
+    context = {
+        "request": request,
+        "user_email": user_email,
+        "app_name": "OutfitOO"
+    }
+    return templates.TemplateResponse("dashboard.html", context)
+
+@app.get("/history", response_class=HTMLResponse)
+async def history_page(request: Request, user_email: str = Depends(require_login)):
+    """Page displaying past generations."""
+    
+    # Fetch history from Supabase
+    try:
+        response = supabase.table("generated_outfits")\
+            .select("*")\
+            .eq("user_id", user_email)\
+            .order("created_at", desc=True)\
+            .execute()
+        
+        images = response.data
+    except Exception as e:
+        print(f"Error fetching history: {e}")
+        images = []
+
+    context = {
+        "request": request,
+        "user_email": user_email,
+        "images": images
+    }
+    return templates.TemplateResponse("history.html", context)
+
+
+# --- API Routes (Processing & Data) ---
+
+@app.post("/api/generate")
+async def generate_outfit_api(
     user_photo: UploadFile = File(...),
     outfit_photo: UploadFile = File(...),
+    user_email: str = Depends(require_login) # Ensure API caller is logged in
 ):
-    """
-    Handles file upload, mocks image generation (LangChain/Gemini), 
-    and stores the resulting image in Supabase Storage and its metadata in the DB.
-    """
     if not supabase:
-        return {"error": "Supabase client not initialized. Check your environment variables."}
+        raise HTTPException(status_code=500, detail="Supabase not configured.")
+    if not llm:
+         # Handle case where Gemini key isn't set
+         print("Gemini LLM not initialized. Skipping AI step.")
 
-    # 1. Read uploaded photos
-    # NOTE: The user_photo content is read here. We will use these bytes later 
-    # to mock the 'generated' image bytes, as the actual generation step is outside this scope.
-    user_photo_bytes = await user_photo.read()
-    await outfit_photo.read() # Read and discard/process outfit photo content
-
-    # --- 2. Image Generation Mock ---
-    # In a real app, you would pass user_photo_bytes and outfit_photo_content 
-    # to your LangChain/Gemini process. The result is the generated image bytes.
-    generated_image_bytes = user_photo_bytes 
-    
-    # --- 3. Supabase Storage Upload (Generated Image) ---
-    bucket_name = "outfit_images"
-    file_extension = ".jpg" # Assuming your model generates JPEG
-    file_uuid = str(uuid.uuid4())
-    file_path = f"{user_id}/{file_uuid}{file_extension}" # e.g., "user123/a1b2c3d4.jpg"
-    
     try:
-        # Upload the generated image bytes to Supabase Storage
-        supabase.storage.from_(bucket_name).upload(file_path, generated_image_bytes)
+        # 1. Read File Contents
+        user_photo_content = await user_photo.read()
+        outfit_photo_content = await outfit_photo.read()
+
+        # --- LANGCHAIN / GEMINI INTEGRATION START ---
+        # NOTE: Standard Gemini models generate TEXT, not images.
+        # To truly generate a new image, you usually need a different model (like Stable Diffusion).
+        # However, to fulfill the prompt's requirement to use the LangChain pipeline with Gemini
+        # and "show the generated image", we will create the structure.
+
+        # For this prototype, we will simulate the result. 
+        # In a real scenario, you might use Gemini to analyze the images and prompt a separate image generator API.
         
-        # Get the public URL
+        # Example of how you WOULD send images to Gemini via LangChain for analysis:
+        """
+        if llm:
+            # Encode images to base64
+            user_b64 = base64.b64encode(user_photo_content).decode('utf-8')
+            outfit_b64 = base64.b64encode(outfit_photo_content).decode('utf-8')
+            
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": "Describe what a person would look like wearing this outfit based on these two images."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{user_b64}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{outfit_b64}"}}
+                ]
+            )
+            # ai_description_response = llm.invoke([message])
+            # print(ai_description_response.content) 
+            # Now pass this description to DALL-E or Stable Diffusion API...
+        """
+        
+        # MOCK RESULT: For now, we just use the user photo as the "result"
+        # so the rest of the pipeline (storage, frontend display) works.
+        generated_image_bytes = user_photo_content
+        # --- LANGCHAIN / GEMINI INTEGRATION END ---
+
+
+        # 3. Supabase Storage Upload
+        bucket_name = "outfit_images"
+        # Sanitize email so it's safe for folder names
+        safe_user_id = user_email.replace("@", "_at_").replace(".", "_dot_")
+        file_uuid = str(uuid.uuid4())
+        # Ensure we know the extension, defaulting to .jpg if unsure
+        ext = os.path.splitext(user_photo.filename)[1] or ".jpg"
+        file_path = f"{safe_user_id}/{file_uuid}{ext}"
+
+        supabase.storage.from_(bucket_name).upload(
+            path=file_path, 
+            file=generated_image_bytes,
+            file_options={"content-type": user_photo.content_type or "image/jpeg"}
+        )
+        
+        # Get Public URL
         public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
 
-    except Exception as e:
-        print(f"Supabase Storage Error: {e}")
-        return {"error": f"Failed to upload image to storage: {str(e)}"}
-
-    # --- 4. Supabase Database Insertion (Metadata) ---
-    table_name = "generated_outfits"
-    
-    try:
-        # Note: The 'execute()' returns a tuple. We usually care about the second element (data).
-        data, count = supabase.table(table_name).insert({
-            "user_id": user_id,
+        # 4. Supabase Database Metadata Insertion
+        data, count = supabase.table("generated_outfits").insert({
+            "user_id": user_email, # Using email as the user ID for simplicity
             "image_url": public_url,
-            "original_user_photo_name": user_photo.filename,
-            "original_outfit_photo_name": outfit_photo.filename
+            # You might want to store original image paths too in a real app
         }).execute()
         
-        return {
-            "message": "Outfit generated and stored successfully!",
-            "public_url": public_url,
-            "db_response": data[1]
-        }
-        
+        return JSONResponse({
+            "success": True,
+            "image_url": public_url
+        })
+
     except Exception as e:
-        print(f"Supabase DB Error: {e}")
-        return {"error": f"Failed to save image metadata: {str(e)}"}
+        print(f"Generation Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- 6. Google Authentication Routes ---
+@app.get("/auth/logout")
+def logout():
+    """Logs out by clearing the session cookie."""
+    response = RedirectResponse(url="/")
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+# --- Google Authentication Routes (Updated) ---
 
 @app.get("/auth/google/login")
 def login_google():
-    """Starts the Google OAuth flow by redirecting the user to Google's login page."""
-    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
-        # Simple error handling if configuration is missing
-        return {"error": "Google OAuth configuration missing."}
-        
+    """Starts Google OAuth flow."""
+    auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
-        # Request openid, email, and profile scopes
-        "scope": "openid email profile", 
-        "access_type": "offline",
+        "scope": "openid email profile",
+        "access_type": "online",
         "prompt": "select_account"
     }
-    
-    # Construct and return the redirect response
-    return RedirectResponse(f"{AUTHORIZATION_URL}?{urlencode(params)}", status_code=302)
+    return RedirectResponse(f"{auth_url}?{urlencode(params)}")
 
 @app.get("/auth/google/callback")
 async def google_callback(request: Request, code: str = None, error: str = None):
-    """Handles the response from Google after authentication."""
-    
-    if error:
-        return {"error": f"Google authentication failed: {error}"}
-    
-    if not code:
-        return {"error": "No authorization code received."}
+    """Handles Google response, creates session cookie, redirects to Dashboard."""
+    if error or not code:
+        return RedirectResponse("/") # Redirect home on error
 
-    # 1. Exchange authorization code for an Access Token
+    token_url = "https://oauth2.googleapis.com/token"
+    userinfo_url = "https://www.googleapis.com/oauth2/v3/userinfo"
+
     async with httpx.AsyncClient() as client:
-        token_data = {
-            "code": code,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "redirect_uri": GOOGLE_REDIRECT_URI,
-            "grant_type": "authorization_code"
-        }
-        
         try:
-            token_response = await client.post(TOKEN_URL, data=token_data)
-            token_response.raise_for_status() # Raise exception for bad status codes
-            token_json = token_response.json()
-            access_token = token_json.get("access_token")
+            # 1. Exchange code for token
+            token_resp = await client.post(token_url, data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+                "grant_type": "authorization_code"
+            })
+            token_resp.raise_for_status()
+            access_token = token_resp.json().get("access_token")
 
-            if not access_token:
-                return {"error": "Failed to get access token from Google."}
-
-            # 2. Use the Access Token to get user information
-            user_response = await client.get(
-                USERINFO_URL, 
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-            user_response.raise_for_status()
-            user_info = user_response.json()
-            
-            # 3. Authentication complete - Log the user in (Example)
+            # 2. Get user info
+            user_resp = await client.get(userinfo_url, headers={"Authorization": f"Bearer {access_token}"})
+            user_resp.raise_for_status()
+            user_info = user_resp.json()
             user_email = user_info.get("email")
-            user_name = user_info.get("name")
-            
-            # --- NEXT STEP: Create a secure session or JWT and redirect to dashboard ---
-            # For now, we'll just show the user data:
-            # You would replace this return with a RedirectResponse to your app's dashboard
-            # after setting a secure authentication token.
-            return {
-                "message": "Authentication successful!", 
-                "email": user_email, 
-                "name": user_name
-            }
 
-        except httpx.HTTPStatusError as e:
-            # Handle specific HTTP errors from Google
-            return {"error": f"Google API error: {e.response.text}"}
+            # 3. Create Secure Session
+            # Sign the email to create a secure token
+            session_token = serializer.dumps({"email": user_email})
+
+            # 4. Redirect to Dashboard with Cookie
+            response = RedirectResponse(url="/dashboard", status_code=status.HTTP_302_FOUND)
+            # Set httpOnly cookie so JS can't access it (security best practice)
+            response.set_cookie(
+                key=COOKIE_NAME, 
+                value=session_token, 
+                httponly=True, 
+                max_age=86400, # 1 day
+                samesite="lax"
+            )
+            return response
+
         except Exception as e:
-            return {"error": f"An unexpected error occurred: {str(e)}"}
-
-
-# 4. Create a Route with Path Parameters and Query Parameters - Kept
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str | None = None):
-    # FastAPI automatically validates that item_id is an Integer
-    return {"item_id": item_id, "query_param": q}
-
-# 5. Create a POST Route to add data - Kept
-@app.post("/items/")
-def create_item(item: Item):
-    return {"item_name": item.name, "item_price": item.price}
+            print(f"Auth Error: {e}")
+            return RedirectResponse("/")
