@@ -1,13 +1,16 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, File, UploadFile # Modified: Added File, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import os
 # --- New Imports for Authentication ---
-from dotenv import load_dotenv # Used for loading .env file
+from dotenv import load_dotenv
 from urllib.parse import urlencode
 from starlette.responses import RedirectResponse
-import httpx # Used for making requests to Google's API (in requirements.txt)
+import httpx
+# --- New Imports for Supabase/File Handling ---
+from supabase import create_client, Client # New
+import uuid # New
 
 # 0. Load Environment Variables from .env
 load_dotenv()
@@ -19,6 +22,20 @@ AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 # ------------------------------------
+
+# --- Supabase Configuration ---
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # This is your Anon Key
+
+# Initialize Supabase client
+supabase: Client = None
+try:
+    if SUPABASE_URL and SUPABASE_KEY:
+        supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    else:
+        print("WARNING: Supabase configuration (SUPABASE_URL or SUPABASE_KEY) missing.")
+except Exception as e:
+    print(f"Error initializing Supabase client: {e}")
 
 # --- Configuration for Templating ---
 # Create a 'templates' directory in the same folder as main.py
@@ -48,6 +65,72 @@ def read_root(request: Request):
     }
     # Look for a file named 'landing_page.html' inside the 'templates' directory
     return templates.TemplateResponse("landing_page.html", context)
+
+
+# 4. Create a Route for Outfit Generation and Storage (New)
+@app.post("/api/generate_outfit/{user_id}")
+async def generate_and_store_outfit(
+    user_id: str,
+    user_photo: UploadFile = File(...),
+    outfit_photo: UploadFile = File(...),
+):
+    """
+    Handles file upload, mocks image generation (LangChain/Gemini), 
+    and stores the resulting image in Supabase Storage and its metadata in the DB.
+    """
+    if not supabase:
+        return {"error": "Supabase client not initialized. Check your environment variables."}
+
+    # 1. Read uploaded photos
+    # NOTE: The user_photo content is read here. We will use these bytes later 
+    # to mock the 'generated' image bytes, as the actual generation step is outside this scope.
+    user_photo_bytes = await user_photo.read()
+    await outfit_photo.read() # Read and discard/process outfit photo content
+
+    # --- 2. Image Generation Mock ---
+    # In a real app, you would pass user_photo_bytes and outfit_photo_content 
+    # to your LangChain/Gemini process. The result is the generated image bytes.
+    generated_image_bytes = user_photo_bytes 
+    
+    # --- 3. Supabase Storage Upload (Generated Image) ---
+    bucket_name = "outfit_images"
+    file_extension = ".jpg" # Assuming your model generates JPEG
+    file_uuid = str(uuid.uuid4())
+    file_path = f"{user_id}/{file_uuid}{file_extension}" # e.g., "user123/a1b2c3d4.jpg"
+    
+    try:
+        # Upload the generated image bytes to Supabase Storage
+        supabase.storage.from_(bucket_name).upload(file_path, generated_image_bytes)
+        
+        # Get the public URL
+        public_url = supabase.storage.from_(bucket_name).get_public_url(file_path)
+
+    except Exception as e:
+        print(f"Supabase Storage Error: {e}")
+        return {"error": f"Failed to upload image to storage: {str(e)}"}
+
+    # --- 4. Supabase Database Insertion (Metadata) ---
+    table_name = "generated_outfits"
+    
+    try:
+        # Note: The 'execute()' returns a tuple. We usually care about the second element (data).
+        data, count = supabase.table(table_name).insert({
+            "user_id": user_id,
+            "image_url": public_url,
+            "original_user_photo_name": user_photo.filename,
+            "original_outfit_photo_name": outfit_photo.filename
+        }).execute()
+        
+        return {
+            "message": "Outfit generated and stored successfully!",
+            "public_url": public_url,
+            "db_response": data[1]
+        }
+        
+    except Exception as e:
+        print(f"Supabase DB Error: {e}")
+        return {"error": f"Failed to save image metadata: {str(e)}"}
+
 
 # --- 6. Google Authentication Routes ---
 
